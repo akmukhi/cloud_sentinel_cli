@@ -7,8 +7,10 @@ from typing import Dict, Iterable, List, Tuple
 
 import click
 
+import json
+
 from sentinel import __version__
-from sentinel.modules import gcp_storage
+from sentinel.modules import gcp_iam, gcp_storage
 
 OUTPUT_FORMATS = ("table", "json")
 
@@ -46,7 +48,7 @@ def scan() -> None:
     """Grouping for scan subcommands."""
 
 
-@scan.command("gcp", help="Scan GCP Storage buckets for common misconfigurations.")
+@scan.command("gcp", help="Scan GCP IAM and Storage for common misconfigurations.")
 @click.option(
     "--project",
     "-p",
@@ -59,26 +61,93 @@ def scan() -> None:
     show_default=True,
     help="Toggle checks that require IAM policy evaluation for public access.",
 )
+@click.option(
+    "--key-age-threshold",
+    type=int,
+    default=90,
+    show_default=True,
+    help="Threshold in days for detecting old service account keys.",
+)
 @click.pass_context
 def scan_gcp(
     ctx: click.Context,
     project: str | None,
     include_public: bool,
+    key_age_threshold: int,
 ) -> None:
     """Entry point for `cloudsentinal scan gcp`."""
 
     project_id = _resolve_project(ctx, project)
     output_format = ctx.obj.get("format", "table")
 
+    # Scan IAM
+    iam_result = None
     try:
-        findings = gcp_storage.scan_buckets(
+        iam_result = gcp_iam.scan_iam(
+            project_id=project_id, key_age_threshold_days=key_age_threshold
+        )
+    except gcp_iam.IAMModuleError as exc:
+        if output_format == "json":
+            # In JSON mode, include error in output structure
+            iam_result = gcp_iam.IAMResult(risks=[], passed=[])
+            click.echo(
+                json.dumps(
+                    {
+                        "error": {"iam": str(exc)},
+                        "gcp": {"iam": iam_result.to_dict(), "storage": {}},
+                    },
+                    indent=2,
+                )
+            )
+            ctx.exit(1)
+        else:
+            raise click.ClickException(f"IAM scan failed: {exc}") from exc
+    except Exception as exc:  # pragma: no cover
+        if output_format == "json":
+            iam_result = gcp_iam.IAMResult(risks=[], passed=[])
+        else:
+            raise click.ClickException(f"IAM scan failed: {exc}") from exc
+
+    # Scan Storage
+    storage_result = None
+    try:
+        storage_result = gcp_storage.scan_buckets_structured(
             project_id=project_id, include_public=include_public
         )
     except gcp_storage.StorageModuleError as exc:
-        raise click.ClickException(str(exc)) from exc
+        if output_format == "json":
+            # In JSON mode, include error in output structure
+            if iam_result is None:
+                iam_result = gcp_iam.IAMResult(risks=[], passed=[])
+            click.echo(
+                json.dumps(
+                    {
+                        "error": {"storage": str(exc)},
+                        "gcp": {
+                            "iam": iam_result.to_dict(),
+                            "storage": {"public_buckets": [], "encryption_issues": []},
+                        },
+                    },
+                    indent=2,
+                )
+            )
+            ctx.exit(1)
+        else:
+            raise click.ClickException(f"Storage scan failed: {exc}") from exc
 
-    _emit_findings(findings, output_format)
-    ctx.exit(1 if findings else 0)
+    # Emit results
+    if output_format == "json":
+        _emit_json_output(iam_result, storage_result)
+    else:
+        _emit_table_output(iam_result, storage_result)
+
+    # Exit with error code if any risks/issues found
+    has_issues = (
+        (iam_result and len(iam_result.risks) > 0)
+        or (storage_result and len(storage_result.public_buckets) > 0)
+        or (storage_result and len(storage_result.encryption_issues) > 0)
+    )
+    ctx.exit(1 if has_issues else 0)
 
 
 def _resolve_project(ctx: click.Context, override: str | None) -> str:
@@ -90,30 +159,83 @@ def _resolve_project(ctx: click.Context, override: str | None) -> str:
     return project
 
 
-def _emit_findings(findings: List[gcp_storage.Finding], fmt: str) -> None:
-    fmt = fmt.lower()
-    if fmt not in OUTPUT_FORMATS:
-        raise click.ClickException(f"Unsupported output format: {fmt}")
+def _emit_json_output(
+    iam_result: gcp_iam.IAMResult | None,
+    storage_result: gcp_storage.StorageResult | None,
+) -> None:
+    """Emit nested JSON output format."""
+    output = {
+        "gcp": {
+            "iam": (iam_result.to_dict() if iam_result else {"risks": [], "passed": []}),
+            "storage": (
+                storage_result.to_dict()
+                if storage_result
+                else {"public_buckets": [], "encryption_issues": []}
+            ),
+        }
+    }
+    click.echo(json.dumps(output, indent=2))
 
-    if fmt == "json":
-        click.echo(gcp_storage.serialize_findings(findings))
-        return
 
-    if not findings:
-        click.echo("✅ No bucket misconfigurations detected.")
+def _emit_table_output(
+    iam_result: gcp_iam.IAMResult | None,
+    storage_result: gcp_storage.StorageResult | None,
+) -> None:
+    """Emit human-readable table output."""
+    all_findings: List[Tuple[str, str, str, str]] = []
+
+    # IAM risks
+    if iam_result and iam_result.risks:
+        for risk in iam_result.risks:
+            all_findings.append(
+                (
+                    risk.resource,
+                    risk.issue,
+                    risk.severity.upper(),
+                    _short_metadata(risk.metadata),
+                )
+            )
+
+    # Storage public buckets
+    if storage_result and storage_result.public_buckets:
+        for bucket in storage_result.public_buckets:
+            all_findings.append(
+                (
+                    bucket.get("resource", bucket.get("bucket", "unknown")),
+                    "Bucket grants access to allUsers/allAuthenticatedUsers",
+                    "HIGH",
+                    _short_metadata(bucket),
+                )
+            )
+
+    # Storage encryption issues
+    if storage_result and storage_result.encryption_issues:
+        for issue in storage_result.encryption_issues:
+            all_findings.append(
+                (
+                    issue.get("resource", issue.get("bucket", "unknown")),
+                    issue.get("issue", "Encryption issue"),
+                    issue.get("severity", "HIGH").upper(),
+                    _short_metadata(issue),
+                )
+            )
+
+    if not all_findings:
+        click.echo("✅ No misconfigurations detected.")
+        if iam_result and iam_result.passed:
+            click.echo("\nPassed checks:")
+            for check in iam_result.passed:
+                click.echo(f"  ✓ {check.get('message', 'Check passed')}")
         return
 
     headers = ("Resource", "Issue", "Severity", "Metadata")
-    rows = [
-        (
-            finding.resource,
-            finding.issue,
-            finding.severity.upper(),
-            _short_metadata(finding.metadata),
-        )
-        for finding in findings
-    ]
-    click.echo(_format_table(headers, rows))
+    click.echo(_format_table(headers, all_findings))
+
+    # Show passed checks
+    if iam_result and iam_result.passed:
+        click.echo("\nPassed checks:")
+        for check in iam_result.passed:
+            click.echo(f"  ✓ {check.get('message', 'Check passed')}")
 
 
 def _short_metadata(metadata: Dict[str, object], limit: int = 60) -> str:

@@ -1,5 +1,10 @@
 # Cloud Sentinel CLI
 
+[![CI](https://github.com/USERNAME/cloud_sentinel_cli/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/cloud_sentinel_cli/actions/workflows/ci.yml)
+[![Codecov](https://codecov.io/gh/USERNAME/cloud_sentinel_cli/branch/main/graph/badge.svg)](https://codecov.io/gh/USERNAME/cloud_sentinel_cli)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Lint: ruff](https://img.shields.io/badge/lint-ruff-yellow.svg)](https://github.com/astral-sh/ruff)
+
 Cloud Sentinel is a lightweight, extensible CLI for detecting cloud misconfigurations and operational drift across GCP services. It focuses on quick, scriptable checks that are easy to automate in CI/CD and scheduled jobs.
 
 - **Misconfigurations**: Opinionated checks for risky defaults and insecure resource settings.
@@ -36,33 +41,89 @@ Alternatively, run directly via `pipx` once packaging is enabled.
 After install, invoke the CLI:
 
 ```bash
-sentinel --help
+cloudsentinal --help
 ```
 
-Example commands (subject to change as the CLI evolves):
+### Scan GCP Resources
+
+Scan both IAM and Storage for misconfigurations:
+
+```bash
+cloudsentinal scan gcp --project <PROJECT_ID>
+```
+
+With custom service account key age threshold:
+
+```bash
+cloudsentinal scan gcp --project <PROJECT_ID> --key-age-threshold 180
+```
+
+Skip public access checks (faster):
+
+```bash
+cloudsentinal scan gcp --project <PROJECT_ID> --skip-public
+```
+
+### Output Formats
+
+Default output is human-readable table format. For automation, use JSON:
+
+```bash
+cloudsentinal scan gcp --project <PROJECT_ID> --format json > results.json
+```
+
+JSON output structure:
+
+```json
+{
+  "gcp": {
+    "iam": {
+      "risks": [
+        {
+          "resource": "projects/my-project",
+          "issue": "Overly permissive role binding: roles/owner",
+          "severity": "high",
+          "metadata": {...}
+        }
+      ],
+      "passed": [
+        {
+          "check": "no_public_members",
+          "resource": "projects/my-project",
+          "message": "No public member bindings found"
+        }
+      ]
+    },
+    "storage": {
+      "public_buckets": [...],
+      "encryption_issues": [...]
+    }
+  }
+}
+```
+
+### Planned Commands
 
 - IAM checks:
   ```bash
-  sentinel iam scan --project <PROJECT_ID>
-  sentinel iam diff --baseline baseline_iam.yaml --project <PROJECT_ID>
+  cloudsentinal iam scan --project <PROJECT_ID>
+  cloudsentinal iam diff --baseline baseline_iam.yaml --project <PROJECT_ID>
   ```
 
 - Storage checks:
   ```bash
-  sentinel storage scan --project <PROJECT_ID>
+  cloudsentinal storage scan --project <PROJECT_ID>
   ```
 
 - Airflow (ETL) health:
   ```bash
-  sentinel airflow health --env <composer|self-hosted> --project <PROJECT_ID>
+  cloudsentinal airflow health --env <composer|self-hosted> --project <PROJECT_ID>
   ```
 
 - Cloud Run hygiene:
   ```bash
-  sentinel cloud-run scan --project <PROJECT_ID> --region <REGION>
+  cloudsentinal cloud-run scan --project <PROJECT_ID> --region <REGION>
   ```
-
-> The exact subcommands and flags will align with implementations in `sentinel/cli.py` and `sentinel/modules/`. See `--help` on each subcommand for the latest interface once implemented.
 
 ---
 
@@ -146,13 +207,13 @@ Module-specific configuration is provided via subcommand flags. Use `--help` for
 
 ## Output
 
-By default, output is human-readable. For automation, prefer JSON:
+By default, output is human-readable table format. For automation, prefer JSON:
 
 ```bash
-sentinel iam scan --project <PROJECT_ID> --format json > results.json
+cloudsentinal scan gcp --project <PROJECT_ID> --format json > results.json
 ```
 
-Planned formats: `table`, `json`, `yaml`.
+Supported formats: `table` (default), `json`.
 
 ---
 

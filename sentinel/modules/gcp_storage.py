@@ -62,6 +62,21 @@ class Finding:
         return data
 
 
+@dataclass
+class StorageResult:
+    """Container for Storage scan results with public buckets and encryption issues."""
+
+    public_buckets: List[Dict[str, Any]]
+    encryption_issues: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the result for JSON output."""
+        return {
+            "public_buckets": self.public_buckets,
+            "encryption_issues": self.encryption_issues,
+        }
+
+
 def scan_buckets(project_id: str, include_public: bool = True) -> List[Finding]:
     """Run a best-effort scan across all buckets in the provided project.
 
@@ -92,6 +107,58 @@ def scan_buckets(project_id: str, include_public: bool = True) -> List[Finding]:
             continue
 
     return findings
+
+
+def scan_buckets_structured(
+    project_id: str, include_public: bool = True
+) -> StorageResult:
+    """Run a structured scan across all buckets in the provided project.
+
+    Args:
+        project_id: Google Cloud project identifier.
+        include_public: When False, skips the more expensive public ACL check.
+
+    Returns:
+        A StorageResult object containing public_buckets and encryption_issues.
+    """
+    if not project_id:
+        raise ValueError("project_id is required")
+
+    client = _build_storage_client(project_id)
+    public_buckets: List[Dict[str, Any]] = []
+    encryption_issues: List[Dict[str, Any]] = []
+
+    try:
+        bucket_iter = client.list_buckets(project=project_id)
+    except gcp_exceptions.GoogleAPIError as exc:  # pragma: no cover - network
+        raise StorageModuleError(f"Failed to list buckets: {exc}") from exc
+
+    for bucket in bucket_iter:
+        try:
+            metadata = _bucket_metadata(bucket)
+
+            # Check for public access
+            if include_public and _bucket_is_public(bucket):
+                public_buckets.append(metadata)
+
+            # Check for encryption
+            encryption = getattr(bucket, "encryption", None)
+            default_kms_key = getattr(bucket, "default_kms_key_name", None)
+            if not encryption and not default_kms_key:
+                encryption_issues.append(
+                    {
+                        **metadata,
+                        "issue": "Bucket encryption not configured",
+                        "severity": "high",
+                    }
+                )
+        except gcp_exceptions.GoogleAPIError as exc:  # pragma: no cover - network
+            logger.debug("Skipping bucket %s due to API error: %s", bucket.name, exc)
+            continue
+
+    return StorageResult(
+        public_buckets=public_buckets, encryption_issues=encryption_issues
+    )
 
 
 def _build_storage_client(project_id: str):
@@ -131,6 +198,19 @@ def _evaluate_bucket(bucket: "storage.Bucket", include_public: bool) -> List[Fin
                 resource=metadata["resource"],
                 issue="Uniform bucket-level access disabled",
                 severity="medium",
+                metadata=metadata,
+            )
+        )
+
+    # Check for encryption
+    encryption = getattr(bucket, "encryption", None)
+    default_kms_key = getattr(bucket, "default_kms_key_name", None)
+    if not encryption and not default_kms_key:
+        findings.append(
+            Finding(
+                resource=metadata["resource"],
+                issue="Bucket encryption not configured",
+                severity="high",
                 metadata=metadata,
             )
         )
