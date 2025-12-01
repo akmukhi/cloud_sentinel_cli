@@ -253,12 +253,13 @@ def _bucket_is_public(bucket: "storage.Bucket") -> bool:
         logger.debug("Unable to read IAM policy for bucket %s", bucket.name)
         return False
 
-    bindings = getattr(policy, "bindings", None)
-    if bindings is None:
-        bindings = policy.get("bindings", [])  # type: ignore[assignment]
-
+    bindings = getattr(policy, "bindings", []) or []
     for binding in bindings:
-        members: Sequence[str] = binding.get("members", [])
+        members = (
+            list(binding.members)
+            if hasattr(binding, "members")
+            else binding.get("members", [])
+        )
         if _members_include_public(members):
             return True
     return False

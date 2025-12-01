@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
 
 import click
-
 import json
 
 from sentinel import __version__
-from sentinel.modules import gcp_iam, gcp_storage
+from sentinel.modules import cloud_run, gcp_iam, gcp_storage
 
 OUTPUT_FORMATS = ("table", "json")
 
@@ -95,6 +95,7 @@ def scan_gcp(
                     {
                         "error": {"iam": str(exc)},
                         "gcp": {"iam": iam_result.to_dict(), "storage": {}},
+                        "services": {},
                     },
                     indent=2,
                 )
@@ -127,6 +128,7 @@ def scan_gcp(
                             "iam": iam_result.to_dict(),
                             "storage": {"public_buckets": [], "encryption_issues": []},
                         },
+                        "services": {},
                     },
                     indent=2,
                 )
@@ -137,9 +139,9 @@ def scan_gcp(
 
     # Emit results
     if output_format == "json":
-        _emit_json_output(iam_result, storage_result)
+        _emit_gcp_json_output(iam_result, storage_result)
     else:
-        _emit_table_output(iam_result, storage_result)
+        _emit_gcp_table_output(iam_result, storage_result)
 
     # Exit with error code if any risks/issues found
     has_issues = (
@@ -148,6 +150,82 @@ def scan_gcp(
         or (storage_result and len(storage_result.encryption_issues) > 0)
     )
     ctx.exit(1 if has_issues else 0)
+
+
+@scan.command("services", help="Scan Cloud Run services for misconfigurations.")
+@click.option(
+    "--project",
+    "-p",
+    metavar="PROJECT_ID",
+    help="Override the project inherited from the root command.",
+)
+@click.option(
+    "--region",
+    metavar="REGION",
+    default="-",
+    show_default=True,
+    help="Cloud Run region to target (use '-' for all regions).",
+)
+@click.option(
+    "--max-revision-age",
+    type=int,
+    default=30,
+    show_default=True,
+    help="Flag revisions older than this many days.",
+)
+@click.option(
+    "--max-revisions",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Flag when retained revisions exceed this count.",
+)
+@click.option(
+    "--image-age-threshold",
+    type=int,
+    default=90,
+    show_default=True,
+    help="Flag container images older than this many days.",
+)
+@click.option(
+    "--include-public/--skip-public",
+    default=True,
+    show_default=True,
+    help="Toggle IAM policy checks for unauthenticated access.",
+)
+@click.pass_context
+def scan_services_cmd(
+    ctx: click.Context,
+    project: str | None,
+    region: str,
+    max_revision_age: int,
+    max_revisions: int,
+    image_age_threshold: int,
+    include_public: bool,
+) -> None:
+    """Entry point for `cloudsentinal scan services`."""
+
+    project_id = _resolve_project(ctx, project)
+    output_format = ctx.obj.get("format", "table")
+
+    try:
+        service_result = cloud_run.scan_services(
+            project_id=project_id,
+            region=region,
+            include_public=include_public,
+            max_revision_age_days=max_revision_age,
+            max_revisions=max_revisions,
+            image_age_days=image_age_threshold,
+        )
+    except cloud_run.CloudRunModuleError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if output_format == "json":
+        _emit_services_json_output(service_result)
+    else:
+        _emit_services_table_output(service_result)
+
+    ctx.exit(1 if service_result.all_findings() else 0)
 
 
 def _resolve_project(ctx: click.Context, override: str | None) -> str:
@@ -159,7 +237,7 @@ def _resolve_project(ctx: click.Context, override: str | None) -> str:
     return project
 
 
-def _emit_json_output(
+def _emit_gcp_json_output(
     iam_result: gcp_iam.IAMResult | None,
     storage_result: gcp_storage.StorageResult | None,
 ) -> None:
@@ -172,12 +250,13 @@ def _emit_json_output(
                 if storage_result
                 else {"public_buckets": [], "encryption_issues": []}
             ),
-        }
+        },
+        "services": {},
     }
     click.echo(json.dumps(output, indent=2))
 
 
-def _emit_table_output(
+def _emit_gcp_table_output(
     iam_result: gcp_iam.IAMResult | None,
     storage_result: gcp_storage.StorageResult | None,
 ) -> None:
@@ -238,12 +317,46 @@ def _emit_table_output(
             click.echo(f"  ✓ {check.get('message', 'Check passed')}")
 
 
+def _emit_services_json_output(service_result: cloud_run.ServiceScanResult) -> None:
+    output = {"services": {"cloud_run": service_result.to_dict()}}
+    click.echo(json.dumps(output, indent=2))
+
+
+def _emit_services_table_output(service_result: cloud_run.ServiceScanResult) -> None:
+    findings = [
+        (
+            finding.service,
+            finding.message,
+            finding.severity.upper(),
+            _short_metadata(finding.metadata),
+        )
+        for finding in service_result.all_findings()
+    ]
+
+    if not findings:
+        click.echo("✅ No Cloud Run service misconfigurations detected.")
+        return
+
+    headers = ("Service", "Issue", "Severity", "Metadata")
+    click.echo(_format_table(headers, findings))
+
+
 def _short_metadata(metadata: Dict[str, object], limit: int = 60) -> str:
-    parts = [f"{key}={metadata[key]}" for key in sorted(metadata.keys())]
+    parts = [
+        f"{key}={_stringify_value(metadata[key])}" for key in sorted(metadata.keys())
+    ]
     summary = ", ".join(parts) or "-"
     if len(summary) <= limit:
         return summary
     return summary[: limit - 3] + "..."
+
+
+def _stringify_value(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None:
+        return "-"
+    return str(value)
 
 
 def _format_table(headers: Tuple[str, ...], rows: Iterable[Tuple[str, ...]]) -> str:

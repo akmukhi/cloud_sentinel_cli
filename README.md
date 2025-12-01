@@ -102,6 +102,47 @@ JSON output structure:
 }
 ```
 
+### Scan Cloud Run Services
+
+```bash
+cloudsentinal scan services --project <PROJECT_ID> --region us-central1
+```
+
+Available flags:
+
+- `--region`: target a specific Cloud Run region (default `-` for all)
+- `--max-revision-age`: mark revisions older than N days (default 30)
+- `--max-revisions`: mark services retaining more than N revisions (default 5)
+- `--image-age-threshold`: mark container images older than N days (default 90)
+
+Checks performed:
+
+- Unauthenticated public access (IAM policy grants `allUsers`/`allAuthenticatedUsers`)
+- Outdated container images (older than threshold or tagged `latest`)
+- Containers missing CPU/Memory limits
+- Stale revisions (age or retention over threshold)
+
+Use JSON output for automation:
+
+```bash
+cloudsentinal scan services --project <PROJECT_ID> --format json
+```
+
+JSON snippet:
+
+```json
+{
+  "services": {
+    "cloud_run": {
+      "public_access": [...],
+      "outdated_images": [...],
+      "resource_limits": [...],
+      "stale_revisions": [...]
+    }
+  }
+}
+```
+
 ### Planned Commands
 
 - IAM checks:
@@ -118,11 +159,6 @@ JSON output structure:
 - Airflow (ETL) health:
   ```bash
   cloudsentinal airflow health --env <composer|self-hosted> --project <PROJECT_ID>
-  ```
-
-- Cloud Run hygiene:
-  ```bash
-  cloudsentinal cloud-run scan --project <PROJECT_ID> --region <REGION>
   ```
 
 ---
@@ -214,6 +250,8 @@ cloudsentinal scan gcp --project <PROJECT_ID> --format json > results.json
 ```
 
 Supported formats: `table` (default), `json`.
+
+Findings are categorized with severity levels (`LOW`, `MEDIUM`, `HIGH`) to help prioritize remediation. Cloud Run service scans surface the severity per issue in both table and JSON output.
 
 ---
 
