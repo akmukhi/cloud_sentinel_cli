@@ -27,6 +27,7 @@ dependencies = [
     "google-cloud-storage>=2.10.0",
     "google-cloud-iam>=2.15.0",
     "google-cloud-run>=1.0.0",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]

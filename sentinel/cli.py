@@ -10,7 +10,7 @@ import click
 import json
 
 from sentinel import __version__
-from sentinel.modules import cloud_run, gcp_iam, gcp_storage
+from sentinel.modules import cloud_run, etl_airflow, gcp_iam, gcp_storage
 
 OUTPUT_FORMATS = ("table", "json")
 
@@ -228,6 +228,85 @@ def scan_services_cmd(
     ctx.exit(1 if service_result.all_findings() else 0)
 
 
+@scan.command("etl", help="Scan Airflow/ETL instances for health and configuration issues.")
+@click.option(
+    "--airflow-url",
+    required=True,
+    metavar="URL",
+    help="Airflow webserver URL (e.g., http://airflow.example.com:8080).",
+)
+@click.option(
+    "--username",
+    metavar="USERNAME",
+    help="Username for basic authentication.",
+)
+@click.option(
+    "--password",
+    metavar="PASSWORD",
+    help="Password for basic authentication.",
+)
+@click.option(
+    "--api-token",
+    metavar="TOKEN",
+    help="API token for authentication (alternative to username/password).",
+)
+@click.option(
+    "--stale-dag-threshold",
+    type=int,
+    default=7,
+    show_default=True,
+    help="Flag DAGs not updated in this many days.",
+)
+@click.option(
+    "--slow-task-multiplier",
+    type=float,
+    default=2.0,
+    show_default=True,
+    help="Flag tasks slower than baseline * this multiplier.",
+)
+@click.option(
+    "--failure-window-hours",
+    type=int,
+    default=24,
+    show_default=True,
+    help="Look back this many hours for failed DAG runs.",
+)
+@click.pass_context
+def scan_etl_cmd(
+    ctx: click.Context,
+    airflow_url: str,
+    username: str | None,
+    password: str | None,
+    api_token: str | None,
+    stale_dag_threshold: int,
+    slow_task_multiplier: float,
+    failure_window_hours: int,
+) -> None:
+    """Entry point for `cloudsentinal scan etl`."""
+
+    output_format = ctx.obj.get("format", "table")
+
+    try:
+        etl_result = etl_airflow.scan_airflow(
+            airflow_url=airflow_url,
+            username=username,
+            password=password,
+            api_token=api_token,
+            stale_dag_threshold_days=stale_dag_threshold,
+            slow_task_multiplier=slow_task_multiplier,
+            failure_window_hours=failure_window_hours,
+        )
+    except etl_airflow.AirflowModuleError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if output_format == "json":
+        _emit_etl_json_output(etl_result)
+    else:
+        _emit_etl_table_output(etl_result)
+
+    ctx.exit(1 if etl_result.all_findings() else 0)
+
+
 def _resolve_project(ctx: click.Context, override: str | None) -> str:
     project = override or ctx.obj.get("project") or os.getenv("GOOGLE_CLOUD_PROJECT")
     if not project:
@@ -339,6 +418,74 @@ def _emit_services_table_output(service_result: cloud_run.ServiceScanResult) -> 
 
     headers = ("Service", "Issue", "Severity", "Metadata")
     click.echo(_format_table(headers, findings))
+
+
+def _emit_etl_json_output(etl_result: etl_airflow.ETLScanResult) -> None:
+    """Emit ETL scan results in JSON format with summary."""
+    summary = etl_result.get_summary()
+    output = {
+        "etl": {
+            "airflow": etl_result.to_dict(),
+            "summary": summary,
+        }
+    }
+    click.echo(json.dumps(output, indent=2))
+
+
+def _emit_etl_table_output(etl_result: etl_airflow.ETLScanResult) -> None:
+    """Emit ETL scan results in table format with alert summary."""
+    summary = etl_result.get_summary()
+
+    # Show alert summary
+    alerts = []
+    if summary["failed_dags"] > 0:
+        alerts.append(f"{summary['failed_dags']} failed DAG(s)")
+    if summary["slow_tasks"] > 0:
+        alerts.append(f"{summary['slow_tasks']} slow task(s)")
+    if summary["unhealthy_workers"] > 0:
+        alerts.append(f"{summary['unhealthy_workers']} unhealthy worker(s)")
+    if summary["stale_dags"] > 0:
+        alerts.append(f"{summary['stale_dags']} stale DAG(s)")
+    if summary["missing_retries"] > 0:
+        alerts.append(f"{summary['missing_retries']} DAG(s) missing retries")
+
+    if alerts:
+        click.echo(f"⚠️  Alert Summary: {', '.join(alerts)}\n")
+
+    findings = [
+        (
+            finding.dag_id,
+            finding.message,
+            finding.severity.upper(),
+            _short_metadata(finding.metadata),
+        )
+        for finding in etl_result.all_findings()
+    ]
+
+    if not findings:
+        click.echo("✅ No Airflow/ETL issues detected.")
+        return
+
+    # Group by severity for better readability
+    high_findings = [f for f in findings if f[2] == "HIGH"]
+    medium_findings = [f for f in findings if f[2] == "MEDIUM"]
+    low_findings = [f for f in findings if f[2] == "LOW"]
+
+    headers = ("DAG ID", "Issue", "Severity", "Metadata")
+
+    if high_findings:
+        click.echo("HIGH Severity:")
+        click.echo(_format_table(headers, high_findings))
+        click.echo()
+
+    if medium_findings:
+        click.echo("MEDIUM Severity:")
+        click.echo(_format_table(headers, medium_findings))
+        click.echo()
+
+    if low_findings:
+        click.echo("LOW Severity:")
+        click.echo(_format_table(headers, low_findings))
 
 
 def _short_metadata(metadata: Dict[str, object], limit: int = 60) -> str:

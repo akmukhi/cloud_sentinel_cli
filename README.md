@@ -143,6 +143,82 @@ JSON snippet:
 }
 ```
 
+### Scan Airflow/ETL Instances
+
+Scan self-hosted Airflow instances for health and configuration issues:
+
+```bash
+cloudsentinal scan etl --airflow-url http://airflow.example.com:8080 --username admin --password secret
+```
+
+With API token authentication:
+
+```bash
+cloudsentinal scan etl --airflow-url http://airflow.example.com:8080 --api-token <TOKEN>
+```
+
+Available flags:
+
+- `--airflow-url`: Airflow webserver URL (required)
+- `--username` / `--password`: Basic authentication credentials
+- `--api-token`: API token for authentication (alternative to username/password)
+- `--stale-dag-threshold`: Flag DAGs not updated in N days (default: 7)
+- `--slow-task-multiplier`: Flag tasks slower than baseline * multiplier (default: 2.0)
+- `--failure-window-hours`: Look back N hours for failed DAG runs (default: 24)
+
+Checks performed:
+
+- **DAG run failures**: Failed DAG runs in the past 24 hours (HIGH severity)
+- **Slow-running tasks**: Tasks running slower than baseline (MEDIUM severity)
+- **Unhealthy workers**: Airflow instance health check failures (HIGH severity)
+- **Stale DAGs**: DAGs not updated in N days (MEDIUM severity)
+- **Missing retry logic**: DAGs or tasks without retry configuration (LOW severity)
+
+The command provides an alert summary showing counts per issue type:
+
+```
+⚠️  Alert Summary: 3 failed DAG(s), 1 slow task(s), 2 stale DAG(s)
+```
+
+Use JSON output for automation:
+
+```bash
+cloudsentinal scan etl --airflow-url http://airflow.example.com:8080 --api-token <TOKEN> --format json
+```
+
+JSON structure:
+
+```json
+{
+  "etl": {
+    "airflow": {
+      "failed_dags": [...],
+      "slow_tasks": [...],
+      "unhealthy_workers": [...],
+      "stale_dags": [...],
+      "missing_retries": [...]
+    },
+    "summary": {
+      "failed_dags": 3,
+      "slow_tasks": 1,
+      "unhealthy_workers": 0,
+      "stale_dags": 2,
+      "missing_retries": 5
+    }
+  }
+}
+```
+
+**Authentication**: The Airflow REST API requires authentication. Use either:
+- Basic authentication with `--username` and `--password`
+- API token with `--api-token` (recommended for automation)
+
+**Required Permissions**: Your Airflow user needs read access to:
+- DAG metadata (`/api/v1/dags`)
+- DAG runs (`/api/v1/dags/{dag_id}/dagRuns`)
+- Task instances (`/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances`)
+- Health endpoint (`/api/v1/health`)
+
 ### Planned Commands
 
 - IAM checks:
@@ -156,10 +232,6 @@ JSON snippet:
   cloudsentinal storage scan --project <PROJECT_ID>
   ```
 
-- Airflow (ETL) health:
-  ```bash
-  cloudsentinal airflow health --env <composer|self-hosted> --project <PROJECT_ID>
-  ```
 
 ---
 
