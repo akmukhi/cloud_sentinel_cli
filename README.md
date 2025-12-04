@@ -315,15 +315,110 @@ Module-specific configuration is provided via subcommand flags. Use `--help` for
 
 ## Output
 
-By default, output is human-readable table format. For automation, prefer JSON:
+By default, output is human-readable table format with rich formatting (colors, tables). For automation, use JSON or YAML:
 
 ```bash
 cloudsentinal scan gcp --project <PROJECT_ID> --format json > results.json
+cloudsentinal scan gcp --project <PROJECT_ID> --format yaml > results.yaml
 ```
 
-Supported formats: `table` (default), `json`.
+Supported formats: `table` (default, with rich formatting), `json`, `yaml`.
 
-Findings are categorized with severity levels (`LOW`, `MEDIUM`, `HIGH`) to help prioritize remediation. Cloud Run service scans surface the severity per issue in both table and JSON output.
+### Writing to Files
+
+Use the `--output` flag to write results to a file:
+
+```bash
+cloudsentinal scan all --format json --output report.json
+```
+
+Use `--quiet` to suppress summary output when writing to file:
+
+```bash
+cloudsentinal scan all --format json --output report.json --quiet
+```
+
+### Severity Levels
+
+Findings are categorized with severity levels (`LOW`, `MEDIUM`, `HIGH`) to help prioritize remediation. The CLI uses color coding in table output:
+- **HIGH/CRITICAL**: Red
+- **MEDIUM**: Yellow  
+- **LOW**: Green
+
+## CI/CD Integration
+
+### Fail on High Severity
+
+Use the `--fail-on-high` flag to exit with code 1 if any HIGH severity findings are detected. This is perfect for CI/CD pipelines:
+
+```bash
+cloudsentinal scan gcp --project <PROJECT_ID> --fail-on-high
+```
+
+Exit codes:
+- `0`: No findings or only MEDIUM/LOW severity findings (unless `--fail-on-high` is set)
+- `1`: Findings detected (or HIGH severity findings if `--fail-on-high` is set)
+
+### Scan All Services
+
+Run all available scans in one command:
+
+```bash
+cloudsentinal scan all --project <PROJECT_ID> --format json --output report.json
+```
+
+This runs:
+- GCP IAM and Storage scans
+- Cloud Run services scan
+- ETL/Airflow scan (if `--airflow-url` is provided)
+
+### GitHub Actions Example
+
+See `.github/workflows/cloudsentinel-scan.yml` for a complete example. Basic usage:
+
+```yaml
+- name: Run CloudSentinel Scan
+  run: |
+    cloudsentinal scan all \
+      --project ${{ secrets.GCP_PROJECT_ID }} \
+      --format json \
+      --output report.json \
+      --fail-on-high
+```
+
+## Alerts
+
+### Slack Alerts
+
+Send findings to Slack via webhook:
+
+```bash
+cloudsentinal scan all \
+  --project <PROJECT_ID> \
+  --slack-webhook https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+```
+
+The alert includes:
+- Summary of findings by category
+- Top findings with details
+- Severity breakdown
+
+### Email Alerts
+
+Send findings via email:
+
+```bash
+cloudsentinal scan all \
+  --project <PROJECT_ID> \
+  --email-to alerts@example.com \
+  --email-from cloudsentinel@example.com \
+  --smtp-server smtp.gmail.com \
+  --smtp-port 587 \
+  --smtp-user your-email@gmail.com \
+  --smtp-password your-app-password
+```
+
+Email alerts include an HTML-formatted report with the same information as Slack alerts.
 
 ---
 
